@@ -16,13 +16,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 
 	"golang.org/x/sync/singleflight"
 )
@@ -64,8 +65,8 @@ type Config struct {
 	// Если не задан — используется 10 секунд.
 	HTTPTimeout time.Duration
 
-	// Logger — slog-логгер. Если не задан — используется slog.Default().
-	Logger *slog.Logger
+	// Logger — logrus-логгер. Если не задан — используется logrus.StandardLogger().
+	Logger *log.Logger
 }
 
 func (c *Config) tokenFile() string {
@@ -89,11 +90,11 @@ func (c *Config) httpTimeout() time.Duration {
 	return 10 * time.Second
 }
 
-func (c *Config) logger() *slog.Logger {
+func (c *Config) logger() *log.Logger {
 	if c.Logger != nil {
 		return c.Logger
 	}
-	return slog.Default()
+	return log.StandardLogger()
 }
 
 // Token хранит полученный IAM-токен и метаданные о его жизненном цикле.
@@ -118,7 +119,7 @@ type Token struct {
 type Manager struct {
 	cfg        Config
 	httpClient *http.Client
-	log        *slog.Logger
+	log        *log.Logger
 
 	mu    sync.RWMutex
 	token *Token
@@ -147,7 +148,7 @@ func New(cfg Config) (*Manager, error) {
 // ctx должен жить всё время работы приложения.
 func (m *Manager) Start(ctx context.Context) {
 	if _, err := m.refreshToken(ctx); err != nil {
-		m.log.Error("ycwlif: initial token fetch failed", "err", err)
+		m.log.WithError(err).Error("ycwlif: initial token fetch failed")
 	}
 	go m.refreshLoop(ctx)
 }
@@ -167,7 +168,7 @@ func (m *Manager) refreshLoop(ctx context.Context) {
 		})
 
 		if err != nil {
-			m.log.Error("ycwlif: background refresh failed", "err", err)
+			m.log.WithError(err).Error("ycwlif: background refresh failed")
 			select {
 			case <-time.After(refreshRetryDelay):
 				continue
@@ -179,10 +180,10 @@ func (m *Manager) refreshLoop(ctx context.Context) {
 		tok := v.(*Token)
 		wait := max(time.Until(tok.RefreshedAt.Add(refreshInterval)), 0)
 
-		m.log.Debug("ycwlif: next IAM token refresh scheduled",
-			"in", wait.Round(time.Second),
-			"iam_expires_at", tok.ExpiresAt.Format(time.RFC3339),
-		)
+		m.log.WithFields(log.Fields{
+			"in":            wait.Round(time.Second),
+			"iam_expires_at": tok.ExpiresAt.Format(time.RFC3339),
+		}).Debug("ycwlif: next IAM token refresh scheduled")
 
 		select {
 		case <-time.After(wait):
@@ -280,7 +281,7 @@ func (m *Manager) refreshToken(ctx context.Context) (*Token, error) {
 	// Извлекаем jti для логирования — позволяет отследить ротацию k8s токена.
 	jti, err := parseJTI(k8sToken)
 	if err != nil {
-		m.log.Warn("ycwlif: failed to parse JWT jti", "err", err)
+		m.log.WithError(err).Warn("ycwlif: failed to parse JWT jti")
 		jti = "<unknown>"
 	}
 
@@ -345,11 +346,11 @@ func (m *Manager) refreshToken(ctx context.Context) (*Token, error) {
 	m.token = tok
 	m.mu.Unlock()
 
-	m.log.Info("ycwlif: obtained IAM token",
-		"k8s_token_jti", jti,
-		"iam_expires_at", tok.ExpiresAt.Format(time.RFC3339),
-		"next_refresh_in", refreshInterval,
-	)
+	m.log.WithFields(log.Fields{
+		"k8s_token_jti":  jti,
+		"iam_expires_at": tok.ExpiresAt.Format(time.RFC3339),
+		"next_refresh_in": refreshInterval,
+	}).Info("ycwlif: obtained IAM token")
 
 	return tok, nil
 }
